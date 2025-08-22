@@ -92,3 +92,89 @@
 - `anchor_train.csv` / `anchor_dev.csv`
 - `scaler_meta.json` (均值/协方差或温度参数)
 - `embedding_config.json` (模型名、max_len、batch_size、hash)
+
+
+# Step 2: Cost Matrix Construction & Sinkhorn OT Alignment
+
+本步骤目标：  
+利用旧版和新版的 embedding 矩阵，构造代价矩阵 (cost matrix) 并通过 Sinkhorn 最优传输 (OT) 得到软匹配矩阵 P。
+
+---
+
+## 0. 输入
+- `E_old.npy` (m × d)：旧版 API 向量矩阵
+- `E_new.npy` (n × d)：新版 API 向量矩阵
+- `old_ids.csv` / `new_ids.csv`：索引表（API id 与向量行号对应）
+
+---
+
+## 1. 构造代价矩阵 M
+- **基础代价**：余弦距离  
+  \( M_{ij} = 1 - \cos(E_{old}[i], E_{new}[j]) \)  
+- **可选融合项**：  
+  - `signature_gap(i,j)`：参数数量/名称差异  
+  - `contract_gap(i,j)`：异常、前置条件、后置条件差异  
+  - `incompat_penalty(i,j)`：已知不兼容的直接大罚  
+- **输出**：`M.npy` 或稀疏 `M_knn.npz`
+
+---
+
+## 2. kNN 剪枝（推荐）
+- 为每个旧版 API，只保留新版本中 **前 k 个最相似候选**（k≈50–200）  
+- 其余位置代价设为大值或直接删除  
+- **输出**：稀疏代价矩阵 `M_knn.npz`
+
+---
+
+## 3. Sinkhorn OT 求解
+- **OT (Optimal Transport)**：最小化总代价 \(\langle P, M\rangle\)，得到运输矩阵 P  
+- **Sinkhorn**：带熵正则的快速 OT 算法，数值稳定  
+- **参数**：  
+  - 熵正则 ε = 0.05 ~ 0.2  
+  - 不平衡强度 τ = 0.5 ~ 2.0（如果 API 数量不相等）  
+- **输出**：运输矩阵 `P.npy` (m × n)
+
+---
+
+## 4. 后处理
+- 从软匹配 P 生成候选映射：  
+  - **Top-k**：每行取前 k 个新 API  
+  - **阈值化**：丢弃低于阈值的匹配  
+  - **容量约束**：避免多个旧 API 挤到同一个新 API
+
+**输出**：`mappings/topk_k=3.csv`, `mappings/final.csv`
+
+---
+
+# Step 3: Anchor-Based Evaluation
+
+本步骤目标：  
+利用已知的旧↔新锚点对，评估软匹配结果的质量。
+
+---
+
+## 0. 输入
+- `P.npy`：运输矩阵  
+- `anchors_train.csv` / `anchors_dev.csv`：锚点对（已知 ground truth）
+
+---
+
+## 1. 指标
+- **Top-k 准确率**：预测的前 k 新 API 中是否包含真实匹配  
+- **AUC**：软匹配分数对正/负样本的区分能力  
+- **结构保持率**（若有图结构）：对齐后邻居是否仍保持
+
+---
+
+## 2. 验收标准
+- Dev 集上：  
+  - Top-1 ≥ 0.70  
+  - Top-5 ≥ 0.90  
+  - AUC ≥ 0.90  
+
+---
+
+## 3. 输出
+- `reports/metrics.json`：包含 Top-k 准确率、AUC 等  
+- `reports/topk.csv`：逐样本匹配情况  
+- 可选可视化：置信度分布、PR/ROC 曲线
